@@ -1,0 +1,141 @@
+#include <xrpl/core/HashRouter.h>
+
+#include <xrpl/basics/base_uint.h>
+#include <xrpl/basics/chrono.h>
+#include <xrpl/beast/container/detail/aged_unordered_container.h>
+#include <xrpl/beast/utility/instrumentation.h>
+
+#include <chrono>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <utility>
+
+namespace xrpl {
+
+auto
+HashRouter::emplace(UInt256 const& key) -> std::pair<Entry&, bool>
+{
+    auto const iter = suppressionMap_.find(key);
+
+    if (iter != suppressionMap_.end())
+    {
+        suppressionMap_.touch(iter);
+        return std::make_pair(std::ref(iter->second), false);
+    }
+
+    // See if any suppressions need to be expired
+    expire(suppressionMap_, setup_.holdTime);
+
+    return std::make_pair(std::ref(suppressionMap_.emplace(key, Entry()).first->second), true);
+}
+
+void
+HashRouter::addSuppression(UInt256 const& key)
+{
+    std::scoped_lock const lock(mutex_);
+
+    emplace(key);
+}
+
+bool
+HashRouter::addSuppressionPeer(UInt256 const& key, PeerShortID peer)
+{
+    return addSuppressionPeerWithStatus(key, peer).first;
+}
+
+std::pair<bool, std::optional<Stopwatch::time_point>>
+HashRouter::addSuppressionPeerWithStatus(UInt256 const& key, PeerShortID peer)
+{
+    std::scoped_lock const lock(mutex_);
+
+    auto result = emplace(key);
+    result.first.addPeer(peer);
+    return {result.second, result.first.relayed()};
+}
+
+bool
+HashRouter::addSuppressionPeer(UInt256 const& key, PeerShortID peer, HashRouterFlags& flags)
+{
+    std::scoped_lock const lock(mutex_);
+
+    auto [s, created] = emplace(key);
+    s.addPeer(peer);
+    flags = s.getFlags();
+    return created;
+}
+
+bool
+HashRouter::shouldProcess(
+    UInt256 const& key,
+    PeerShortID peer,
+    HashRouterFlags& flags,
+    std::chrono::seconds txInterval)
+{
+    std::scoped_lock const lock(mutex_);
+
+    auto result = emplace(key);
+    auto& s = result.first;
+    s.addPeer(peer);
+    flags = s.getFlags();
+    return s.shouldProcess(suppressionMap_.clock().now(), txInterval);
+}
+
+bool
+HashRouter::clearFlags(UInt256 const& key, HashRouterFlags flags)
+{
+    XRPL_ASSERT(any(flags), "xrpl::HashRouter::clearFlags : valid input");
+
+    std::scoped_lock const lock(mutex_);
+
+    // Clearing creates no entry and refreshes none, so look the key up without emplace().
+    auto const iter = suppressionMap_.find(key);
+    if (iter == suppressionMap_.end())
+        return false;
+
+    // Report the change that happened rather than the one expected.
+    auto& entry = iter->second;
+    auto const before = entry.getFlags();
+    entry.clearFlags(flags);
+    return entry.getFlags() != before;
+}
+
+HashRouterFlags
+HashRouter::getFlags(UInt256 const& key)
+{
+    std::scoped_lock const lock(mutex_);
+
+    return emplace(key).first.getFlags();
+}
+
+bool
+HashRouter::setFlags(UInt256 const& key, HashRouterFlags flags)
+{
+    XRPL_ASSERT(any(flags), "xrpl::HashRouter::setFlags : valid input");
+
+    std::scoped_lock const lock(mutex_);
+
+    auto& s = emplace(key).first;
+
+    if ((s.getFlags() & flags) == flags)
+        return false;
+
+    s.setFlags(flags);
+    return true;
+}
+
+auto
+HashRouter::shouldRelay(UInt256 const& key) -> std::optional<std::set<PeerShortID>>
+{
+    std::scoped_lock const lock(mutex_);
+
+    auto& s = emplace(key).first;
+
+    if (!s.shouldRelay(suppressionMap_.clock().now(), setup_.relayTime))
+        return {};
+
+    return s.releasePeerSet();
+}
+
+}  // namespace xrpl

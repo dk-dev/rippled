@@ -1,16 +1,19 @@
-# Rippled Docker Image
+# `xrpld` Docker Image
 
-Rippled has a continuous deployment pipeline that turns every git commit into a
-docker image for quick testing and deployment.
+`xrpld` is published to Docker Hub as [`xrplf/xrpld`](https://hub.docker.com/r/xrplf/xrpld):
+the `xrpld` DEB package installed on Ubuntu 26.04, running as the `xrpld` user.
+Each release is tagged with its version, `xrplf/xrpld:<version>`, and
+`xrplf/xrpld:develop` follows the `develop` branch.
+See [`package/README.md`](../package/README.md#docker-images) for how it is built
+and tagged.
 
-To run the tip of the latest release via docker:
+```bash
+docker run --detach --name xrpld \
+    --volume xrpld-db:/var/lib/xrpld \
+    --publish 2459:2459 \
+    xrplf/xrpld:develop
+```
 
-```$ docker run -P -v /srv/rippled/ ripple/rippled:latest```
-
-To run the tip of active development:
-
-```$ docker run -P -v /srv/rippled/ ripple/rippled:develop```
-
-Where ```/srv/rippled``` points to a directory containing a rippled.cfg and
-database files. By default, port 5005/tcp maps to the RPC port and 51235/udp to
-the peer port.
+The admin ports (5005, 6006 and 50051) listen on `127.0.0.1` in the shipped
+configuration; to reach them from outside the container, mount your own over
+`/etc/xrpld/xrpld.cfg`.
